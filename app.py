@@ -91,7 +91,7 @@ If the text contains no jargon and needs no simplification, set "already_plain" 
 and return the input unchanged as "simplified_text" with an empty "changes" list."""
 
 GENERIC_ERR = re.compile(
-    r"(?<![\w])(?:ERR_[A-Z0-9_]+|ECONN[A-Z]+|ETIMEDOUT|ENOENT|EACCES|EPERM|0x[0-9A-Fa-f]{4,}|HTTP\s?[45]\d{2})(?![\w])"
+    r"(?<![\w])(?:ERR_[A-Z0-9_]+|ECONN[A-Z]+|ETIMEDOUT|ENOENT|EACCES|EPERM|0x[0-9A-Fa-f]{4,}|HTTP\s?[45]\d{2}|[A-Z][A-Za-z]+(?:Error|Exception))(?![\w])"
 )
 
 st.set_page_config(page_title="Jorgan Buster", page_icon="🧹", layout="wide")
@@ -498,16 +498,30 @@ def page_saved():
 
 def page_glossary():
     entries, _ = load_glossary()
-    c1, c2 = st.columns([3, 2])
+    c1, c2, c3 = st.columns([3, 2, 2])
     q = c1.text_input("Search terms", key="glossary_q").strip().lower()
-    cat = c2.selectbox("Subdomain", ["All"] + CATEGORIES[:-1], key="glossary_cat")
+    cat = c2.selectbox("Subdomain", ["All"] + CATEGORIES, key="glossary_cat")
+    typ_label = c3.selectbox("Type", ["All", "Jargon", "Acronym", "Error code"], key="glossary_type")
+    typ = {"Jargon": "jargon", "Acronym": "acronym", "Error code": "error_code"}.get(typ_label)
+
     shown = [
         e for e in sorted(entries, key=lambda e: e["term"].lower())
         if (cat == "All" or e["category"] == cat)
+        and (typ is None or e["type"] == typ)
         and (not q or q in e["term"].lower() or q in e["definition"].lower())
     ]
-    st.caption(f"{len(shown)} terms")
-    for e in shown:
+    page_size = 40
+    pages = max(1, -(-len(shown) // page_size))
+    # The key changes with the filters, so the page number resets to 1 when they change.
+    page_no = 1
+    if pages > 1:
+        page_no = st.number_input(
+            "Page", min_value=1, max_value=pages, value=1, step=1, key=f"gpage_{cat}_{typ}_{q}"
+        )
+    st.caption(f"{len(shown)} terms" + (f" · page {page_no} of {pages}" if pages > 1 else ""))
+
+    chunk = shown[(page_no - 1) * page_size : page_no * page_size]
+    for e in chunk:
         mark = "✓ " if e["term"].lower() in st.session_state.viewed else ""
         with st.expander(f"{mark}{DOTS[e['type']]} {e['term']}", expanded=bool(q) and len(shown) == 1):
             st.caption(e["category"])
