@@ -117,11 +117,76 @@ st.markdown(
 # --------------------------------------------------------------------------- #
 # Glossary + matching
 # --------------------------------------------------------------------------- #
+def _norm(t):
+    return re.sub(r"\s+", " ", t).strip().lower()
+
+
 @st.cache_resource
 def load_glossary():
-    data = json.loads((Path(__file__).parent / "glossary.json").read_text(encoding="utf-8"))
-    lookup = {e["term"].lower(): e for e in data}
+    """Hand-written entries from glossary.json, plus the large term list in seed_terms.txt.
+    Seed terms have no definition yet; it is written by the model the first time it is needed."""
+    base = Path(__file__).parent
+    data = json.loads((base / "glossary.json").read_text(encoding="utf-8"))
+    lookup = {_norm(e["term"]): e for e in data}
+    seed = base / "seed_terms.txt"
+    if seed.exists():
+        for line in seed.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = [p.strip() for p in line.split("|", 2)]
+            if len(parts) != 3 or parts[1] not in COLORS:
+                continue
+            cat, typ, terms = parts
+            for t in terms.split(","):
+                t = t.strip()
+                if t and _norm(t) not in lookup:
+                    e = {"term": t, "type": typ, "category": cat, "definition": None, "example": None}
+                    data.append(e)
+                    lookup[_norm(t)] = e
     return data, lookup
+
+
+DEF_SYSTEM = """You write entries for a plain-language IT glossary aimed at non-experts.
+You receive JSON: {"category": ..., "terms": [{"term": ..., "type": ...}]}.
+For each term write:
+- "definition": at most 25 words, grade 6-8 reading level, no unexplained jargon, without repeating the term where possible.
+  * type "acronym": begin with the full expansion, then a period, then what it means. If the term is not truly an acronym (for example a product name), just define it.
+  * type "error_code": say what the error means and its most common cause.
+  * type "jargon": say what it is or does.
+- "example": one short sentence (at most 20 words) that uses the term naturally.
+Be accurate. Return ONLY JSON: {"entries": [{"term": "<copied exactly>", "definition": "...", "example": "..."}]}"""
+
+
+@st.cache_data(show_spinner=False, max_entries=5000)
+def generate_details(term, typ, category):
+    """Write a definition with the model. Cached, so each term is generated once for all users."""
+    key = get_api_key()
+    if not key:
+        raise RuntimeError("missing_key")
+    resp = Groq(api_key=key).chat.completions.create(
+        model=MODEL,
+        messages=[
+            {"role": "system", "content": DEF_SYSTEM},
+            {"role": "user", "content": json.dumps({"category": category, "terms": [{"term": term, "type": typ}]})},
+        ],
+        temperature=0.2,
+        max_completion_tokens=3000,
+        reasoning_effort="low",
+        response_format={"type": "json_object"},
+    )
+    entries = parse_json(resp.choices[0].message.content).get("entries") or [{}]
+    d, ex = str(entries[0].get("definition", "")).strip(), str(entries[0].get("example", "")).strip()
+    if not d or not ex:
+        raise ValueError("empty definition")
+    return {"definition": d, "example": ex}
+
+
+def get_details(entry):
+    """Return {'definition', 'example'} for a glossary entry, generating it if needed."""
+    if entry.get("definition"):
+        return {"definition": entry["definition"], "example": entry["example"]}
+    return generate_details(entry["term"], entry["type"], entry["category"])
 
 
 def _alt(terms):
@@ -143,7 +208,7 @@ def get_patterns(category):
 
 
 def resolve(matched, lookup):
-    key = re.sub(r"\s+", " ", matched).lower()
+    key = _norm(matched)
     if key in lookup:
         return key
     for suffix in ("es", "s"):
@@ -152,6 +217,7 @@ def resolve(matched, lookup):
     return None
 
 
+@st.cache_data(show_spinner=False, max_entries=200)
 def find_matches(text, category):
     """Return non-overlapping (start, end, glossary_key_or_None, type) sorted by position."""
     _, lookup = load_glossary()
@@ -334,13 +400,19 @@ def term_dialog(key, shown):
     if not entry:
         st.info("Definition not available yet. We're working on it.")
         return
+    try:
+        with st.spinner("Writing definition..."):
+            info = get_details(entry)
+    except Exception:
+        st.error("Could not load definition. Please try again.")
+        return
     st.session_state.viewed.add(key)
     st.caption(entry["category"])
-    st.write(entry["definition"])
-    st.markdown(f"*Example:* {entry['example']}")
+    st.write(info["definition"])
+    st.markdown(f"*Example:* {info['example']}")
     c1, c2 = st.columns(2)
     with c1:
-        copy_button(entry["definition"], "Copy Definition", "def")
+        copy_button(info["definition"], "Copy Definition", "def")
     with c2:
         if st.button("See in Glossary", use_container_width=True):
             st.session_state.goto = {"page": "Glossary", "q": entry["term"]}
@@ -371,7 +443,7 @@ def render_result(res):
     spans = []
     if show_hl:
         for s, e, key, typ in matches:
-            title = lookup[key]["definition"] if key else "Definition not available yet."
+            title = (lookup[key]["definition"] or "Tap the term below for its definition.") if key else "Definition not available yet."
             spans.append((s, e, f"jb-{typ}", title))
 
     left, right = st.columns(2)
@@ -508,7 +580,7 @@ def page_glossary():
         e for e in sorted(entries, key=lambda e: e["term"].lower())
         if (cat == "All" or e["category"] == cat)
         and (typ is None or e["type"] == typ)
-        and (not q or q in e["term"].lower() or q in e["definition"].lower())
+        and (not q or q in e["term"].lower() or q in (e["definition"] or "").lower())
     ]
     page_size = 40
     pages = max(1, -(-len(shown) // page_size))
@@ -522,11 +594,15 @@ def page_glossary():
 
     chunk = shown[(page_no - 1) * page_size : page_no * page_size]
     for e in chunk:
-        mark = "✓ " if e["term"].lower() in st.session_state.viewed else ""
+        k = _norm(e["term"])
+        mark = "✓ " if k in st.session_state.viewed else ""
         with st.expander(f"{mark}{DOTS[e['type']]} {e['term']}", expanded=bool(q) and len(shown) == 1):
             st.caption(e["category"])
-            st.write(e["definition"])
-            st.markdown(f"*Example:* {e['example']}")
+            if e["definition"]:
+                st.write(e["definition"])
+                st.markdown(f"*Example:* {e['example']}")
+            elif st.button("Show definition", key=f"gdef_{k}"):
+                term_dialog(k, e["term"])
 
 
 # --------------------------------------------------------------------------- #
