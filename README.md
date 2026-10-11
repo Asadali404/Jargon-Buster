@@ -1,4 +1,4 @@
-# Jorgan Buster
+# Jargon Buster
 
 Turns IT jargon into plain language. Streamlit front end, Groq `openai/gpt-oss-120b` for the LLM. Free tools only.
 
@@ -15,6 +15,12 @@ Get a free key at https://console.groq.com/keys
 2. Go to https://share.streamlit.io, click **Create app**, pick the repo, branch and `app.py`.
 3. Open **Advanced settings > Secrets** and add: `GROQ_API_KEY = "your-key"`.
 4. Deploy. Every push to the branch redeploys the app.
+
+## How the simplified text works
+Every jargon term or acronym is replaced by its simplest plain meaning, in place. A second check re-runs the text if any glossary term is still left in the result.
+
+## Interface
+Custom CSS plus small HTML/JS widgets (`streamlit.components.v1.html`), all supported on Streamlit Community Cloud: live word counter, clickable highlighted terms with instant definitions, clickable green swaps, filter chips, synced scrolling, copy buttons.
 
 ## Files
 - `app.py` - the app (input, categories, simplify, side-by-side, highlighting, definitions, saved, glossary)
